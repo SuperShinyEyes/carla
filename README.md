@@ -1,6 +1,40 @@
 CARLA Simulator
 ===============
 
+
+
+Rendering options
+-----------------
+
+```bash
+-quality-level=Epic
+-quality-level=Low
+
+# Off-screen rendering since v0.9.12
+-RenderOffScreen
+# # Off-screen rendering until v0.9.11
+DISPLAY= ./CarlaUE4.sh -opengl
+
+DISPLAY=:0.GPU ./CarlaUE4.sh -vulkan
+```
+> In no-rendering mode, cameras and GPU sensors will return empty data. The GPU is not used. Unreal Engine is not drawing any scene.
+
+- No-rendering mode: Unreal Engine does not render anything. Graphics are not computed. GPU based sensors return empty data.
+- Off-screen mode: Unreal Engine is working as usual, rendering is computed but there is no display available. GPU based sensors return data.
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------
 [![Build Status](https://travis-ci.org/carla-simulator/carla.svg?branch=master)](https://travis-ci.org/carla-simulator/carla)
 [![Documentation](https://readthedocs.org/projects/carla/badge/?version=latest)](http://carla.readthedocs.io)
 

@@ -33,6 +33,7 @@ import carla
 from carla import ColorConverter as cc
 Attachment = carla.AttachmentType
 
+import weakref
 import time
 import argparse
 import logging
@@ -46,28 +47,7 @@ import cv2 as cv
 
 images = []
 WIDTH, HEIGHT = 1280, 720
-# self._camera_transforms = [
-#             (carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=8.0)), Attachment.SpringArm),
-#             (carla.Transform(carla.Location(x=1.6, z=1.7)), Attachment.Rigid),
-#             (carla.Transform(carla.Location(x=5.5, y=1.5, z=1.5)), Attachment.SpringArm),
-#             (carla.Transform(carla.Location(x=-8.0, z=6.0), carla.Rotation(pitch=6.0)), Attachment.SpringArm),
-#             (carla.Transform(carla.Location(x=-1, y=-bound_y, z=0.5)), Attachment.Rigid)]
-#         self.transform_index = 1
-#         self.sensors = [
-#             ['sensor.camera.rgb', cc.Raw, 'Camera RGB', {}],
-#             ['sensor.camera.depth', cc.Raw, 'Camera Depth (Raw)', {}],
-#             ['sensor.camera.depth', cc.Depth, 'Camera Depth (Gray Scale)', {}],
-#             ['sensor.camera.depth', cc.LogarithmicDepth, 'Camera Depth (Logarithmic Gray Scale)', {}],
-#             ['sensor.camera.semantic_segmentation', cc.Raw, 'Camera Semantic Segmentation (Raw)', {}],
-#             ['sensor.camera.semantic_segmentation', cc.CityScapesPalette,
-#                 'Camera Semantic Segmentation (CityScapes Palette)', {}],
-#             ['sensor.lidar.ray_cast', None, 'Lidar (Ray-Cast)', {'range': '50'}],
-#             ['sensor.camera.dvs', cc.Raw, 'Dynamic Vision Sensor', {}],
-#             ['sensor.camera.rgb', cc.Raw, 'Camera RGB Distorted',
-#                 {'lens_circle_multiplier': '3.0',
-#                 'lens_circle_falloff': '3.0',
-#                 'chromatic_aberration_intensity': '0.5',
-#                 'chromatic_aberration_offset': '0'}]]
+RECORD_LENGTH_IN_SEC = 5
 
 def get_vehicle(world):
     bp = world.get_blueprint_library().filter('model3')[0]
@@ -80,12 +60,11 @@ def get_vehicle(world):
     spawn_point = random.choice(spawn_points) 
     vehicle = world.spawn_actor(bp, spawn_point)
     
-    vehicle.set_autopilot(True)
     # vehicle.apply_control(carla.VehicleControl(throttle=1.0, steer=0))
     
-    physics_control = vehicle.get_physics_control()
-    physics_control.use_sweep_wheel_collision = True
-    vehicle.apply_physics_control(physics_control)
+    # physics_control = vehicle.get_physics_control()
+    # physics_control.use_sweep_wheel_collision = True
+    # vehicle.apply_physics_control(physics_control)
 
     return vehicle
 
@@ -110,68 +89,78 @@ def get_camera(world, parent_actor, height, width, gamma):
     print("Attached camera")
     return camera
 
-    
-def image_to_buffer(data):
-    global images
-    image = np.array(data.raw_data)
-    image = image.reshape((HEIGHT, WIDTH, 4))
-    image = image[:,:,:3]
-    images.append(image)
-    print(f"Saved {len(images)} images")
+def carla_image_to_numpy(data):
+    data.convert(cc.Raw)
+    image = np.frombuffer(data.raw_data, dtype=np.dtype("uint8"))
+    image = np.reshape(image, (data.height, data.width, 4))
+    image = image[:, :, :3]
+    return image
 
-def save_video(images):
+def save_video(images, filepath):
     
     resolution = (WIDTH, HEIGHT)
-    print(f"Make video from {len(images)} frames")
-    vwriter = cv.VideoWriter('out.mp4', VideoWriter_fourcc(*'MP4V'), 30,
-                              resolution)
-    for image in images:
+    fps_real = len(images)/RECORD_LENGTH_IN_SEC
+    fps = int(fps_real)
+    print(f"Make video from {len(images)} frames; {fps_real} fps")
+    vwriter = cv.VideoWriter(filepath, VideoWriter_fourcc(*'mp4v'), fps,
+                            resolution)
+    for data in images:
+        image = carla_image_to_numpy(data)
         vwriter.write(image)
 
     vwriter.release()
+class Recorder(object):
 
+    def __init__(self, map):
+        self.images = []
+        self.vehicle = None
+        
+        self.client = carla.Client('localhost', 2000)
+        self.client.set_timeout(3.0)
+        
+        self.client.load_world(map)
+        self.client.reload_world()
 
-def loop(args):
-    global images
-    world = camera = None
-    actors = []
-    try:
-        client = carla.Client('localhost', 2000)
-        client.set_timeout(2.0)
-
-        world = client.get_world()
+        self.world = self.client.get_world()
 
         # Enable autopilot
-        traffic_manager = client.get_trafficmanager(8000)
-        traffic_manager.set_global_distance_to_leading_vehicle(1.0)
+        traffic_manager = self.client.get_trafficmanager(8000)
+        # traffic_manager.set_global_distance_to_leading_vehicle(1.0)
+        # traffic_manager.ignore_lights_percentage(vehicle,100)
         traffic_manager.set_hybrid_physics_mode(True)
 
-        for _ in range(1):
-            vehicle = get_vehicle(world)
-            actors.append(vehicle)
+        self.vehicle = get_vehicle(self.world)
+        self.vehicle.set_autopilot(True)
 
-        camera = get_camera(world, parent_actor=vehicle, height=args.height, width=args.width, gamma=args.gamma)
+    def record(self, filepath, duration_in_second, height, width, gamma):
+        camera = get_camera(self.world, parent_actor=self.vehicle, height=height, width=width, gamma=gamma)
         print(camera)
-        # camera.listen(lambda image: image.save_to_disk('_out/%06d.png' % image.frame, cc))
-        camera.listen(lambda data: image_to_buffer(data))
 
-        time.sleep(5)
-    except KeyboardInterrupt:
-        print("Interrupted")
-    except Exception as e:
-        print(e)
-        print(repr(e))
-        print(e.args)
-    finally:
-        save_video(images=images)
-        for actor in actors:
-            actor.destroy()
+        time.sleep(1)   # Wait until autopilot kicks in properly
+        weak_self = weakref.ref(self)
+        camera.listen(lambda data: Recorder.buffer_camera_data(weak_self, data))
+        time.sleep(duration_in_second)
+
         if camera is not None:
             camera.destroy()
 
-        # if world is not None:
-        #     world.destroy()
+        save_video(images=self.images, filepath=filepath)
+        self.images = []
 
+    def __del__(self, *args):
+        print("Destroy the car")
+        if self.vehicle is not None:
+            carla.command.DestroyActor(self.vehicle)
+
+    @staticmethod
+    def buffer_camera_data(weak_self, data):
+        self = weak_self()
+        if not self: 
+            print(f'self is None: {self}')
+            return
+
+        self.images.append(data)
+        
 
 def main():
     argparser = argparse.ArgumentParser(
@@ -203,16 +192,26 @@ def main():
     log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
 
-
     print(__doc__)
 
-    try:
-
-        loop(args)
-
-    except KeyboardInterrupt:
-        print('\nCancelled by user. Bye!')
-
+    # recorder = Recorder(map='/Game/Carla/Maps/Town10HD',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town04_Opt',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town10HD_Opt',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town07',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town04',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town02',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town06_Opt',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town03_Opt',)
+    recorder = Recorder(map='/Game/Carla/Maps/Town07_Opt',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town06',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town01_Opt',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town01',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town05',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town05_Opt',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town02_Opt',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town03')
+    recorder.record(filepath='output.mp4', duration_in_second=5, height=args.height, width=args.width, gamma=args.gamma,)
+        
 
 if __name__ == '__main__':
 
