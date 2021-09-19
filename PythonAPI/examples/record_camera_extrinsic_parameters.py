@@ -47,7 +47,7 @@ import cv2 as cv
 
 images = []
 WIDTH, HEIGHT = 1280, 720
-RECORD_LENGTH_IN_SEC = 5
+RECORD_LENGTH_IN_SEC = 60
 
 def get_vehicle(world):
     bp = world.get_blueprint_library().filter('model3')[0]
@@ -66,15 +66,29 @@ def get_vehicle(world):
     # physics_control.use_sweep_wheel_collision = True
     # vehicle.apply_physics_control(physics_control)
 
+    
+    # Vehicle physics setting from Openpilot make tires less slippery
+    # wheel_control = carla.WheelPhysicsControl(tire_friction=5)
+    physics_control = vehicle.get_physics_control()
+    physics_control.mass = 2326
+    # physics_control.wheels = [wheel_control]*4
+    physics_control.torque_curve = [[20.0, 500.0], [5000.0, 500.0]]
+    physics_control.gear_switch_time = 0.0
+    vehicle.apply_physics_control(physics_control)
+
+
     return vehicle
 
-def get_camera(world, parent_actor, height, width, gamma):
+def get_camera(world, parent_actor, height, width, gamma, fps):
     bp_library = world.get_blueprint_library()
     item = ['sensor.camera.rgb', cc.Raw, 'Camera RGB', {}]
     bp = bp_library.find(item[0])
     # camera_bp = world.get_blueprint_library().find('sensor.camera.depth')
     bp.set_attribute('image_size_x', str(width))
     bp.set_attribute('image_size_y', str(height))
+    bp.set_attribute('fov', '70')
+    bp.set_attribute('sensor_tick', str(1/fps))
+  
     if bp.has_attribute('gamma'):
         bp.set_attribute('gamma', str(gamma))
     for attr_name, attr_value in item[3].items():
@@ -96,12 +110,9 @@ def carla_image_to_numpy(data):
     image = image[:, :, :3]
     return image
 
-def save_video(images, filepath):
+def save_video(images, filepath, fps):
     
     resolution = (WIDTH, HEIGHT)
-    fps_real = len(images)/RECORD_LENGTH_IN_SEC
-    fps = int(fps_real)
-    print(f"Make video from {len(images)} frames; {fps_real} fps")
     vwriter = cv.VideoWriter(filepath, VideoWriter_fourcc(*'mp4v'), fps,
                             resolution)
     for data in images:
@@ -118,8 +129,8 @@ class Recorder(object):
         self.client = carla.Client('localhost', 2000)
         self.client.set_timeout(3.0)
         
-        self.client.load_world(map)
-        self.client.reload_world()
+        # self.client.load_world(map)
+        # self.client.reload_world()
 
         self.world = self.client.get_world()
 
@@ -132,19 +143,39 @@ class Recorder(object):
         self.vehicle = get_vehicle(self.world)
         self.vehicle.set_autopilot(True)
 
-    def record(self, filepath, duration_in_second, height, width, gamma):
-        camera = get_camera(self.world, parent_actor=self.vehicle, height=height, width=width, gamma=gamma)
-        print(camera)
+    def _set_world_setting(self, fps):
+        settings = self.world.get_settings()
+        settings.fixed_delta_seconds = (1.0 / fps)
+        self.world.apply_settings(settings)
 
+
+    def record(self, filepath, fps, duration_in_second, height, width, gamma):
+        self._set_world_setting(fps)
+        max_n_frame = fps * duration_in_second
+        
+        camera = get_camera(self.world, parent_actor=self.vehicle, height=height, width=width, gamma=gamma, fps=fps)
+        print(camera)
+        logging.info(f"Capture video; fps={fps}, duration_in_second={duration_in_second}, resolution={width}x{height}")
+        ############################
+        # Capture video
         time.sleep(1)   # Wait until autopilot kicks in properly
+        _start = time.perf_counter()
         weak_self = weakref.ref(self)
         camera.listen(lambda data: Recorder.buffer_camera_data(weak_self, data))
-        time.sleep(duration_in_second)
 
+        while 1:
+            if len(self.images) >= max_n_frame:
+                break
+            time.sleep(0.1)
+
+        _end = time.perf_counter()
+        print(f"Simulation of {duration_in_second} seconds took {_end - _start:.2f} seconds.")
         if camera is not None:
             camera.destroy()
 
-        save_video(images=self.images, filepath=filepath)
+        ############################
+
+        save_video(images=self.images, filepath=filepath, fps=fps)
         self.images = []
 
     def __del__(self, *args):
@@ -163,33 +194,7 @@ class Recorder(object):
         
 
 def main():
-    argparser = argparse.ArgumentParser(
-        description='CARLA Manual Control Client')
-    argparser.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        dest='debug',
-        help='print debug information')
-    argparser.add_argument(
-        '--res',
-        metavar='WIDTHxHEIGHT',
-        default='1280x720',
-        help='window resolution (default: 1280x720)')
-    argparser.add_argument(
-        '--filter',
-        metavar='PATTERN',
-        default='vehicle.*',
-        help='actor filter (default: "vehicle.model3")')
-    argparser.add_argument(
-        '--gamma',
-        default=2.2,
-        type=float,
-        help='Gamma correction of the camera (default: 2.2)')
-    args = argparser.parse_args()
-
-    args.width, args.height = [int(x) for x in args.res.split('x')]
-
-    log_level = logging.DEBUG if args.debug else logging.INFO
+    log_level = logging.DEBUG if True else logging.INFO
     logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
 
     print(__doc__)
@@ -202,15 +207,15 @@ def main():
     # recorder = Recorder(map='/Game/Carla/Maps/Town02',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town06_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town03_Opt',)
-    recorder = Recorder(map='/Game/Carla/Maps/Town07_Opt',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town07_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town06',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town01_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town01',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town05',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town05_Opt',)
+    recorder = Recorder(map='/Game/Carla/Maps/Town05_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town02_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town03')
-    recorder.record(filepath='output.mp4', duration_in_second=5, height=args.height, width=args.width, gamma=args.gamma,)
+    recorder.record(filepath='output.mp4', fps=30, duration_in_second=60, height=720, width=1280, gamma=2.2,)
         
 
 if __name__ == '__main__':
