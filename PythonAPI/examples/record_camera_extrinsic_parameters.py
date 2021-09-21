@@ -38,6 +38,7 @@ import time
 import argparse
 import logging
 import random
+from datetime import datetime
 
 import numpy as np
 from cv2 import (CAP_PROP_FOURCC, CAP_PROP_FPS, CAP_PROP_FRAME_COUNT,
@@ -80,20 +81,29 @@ def get_vehicle(world):
     return vehicle
 
 def get_camera(world, parent_actor, height, width, gamma, fps):
+    """Configure camera
+    - https://carla.readthedocs.io/en/0.9.11/ref_sensors/#rgb-camera
+    - https://carla.readthedocs.io/en/0.9.11/ref_sensors/#advanced-camera-attributes
+    """
     bp_library = world.get_blueprint_library()
-    item = ['sensor.camera.rgb', cc.Raw, 'Camera RGB', {}]
-    bp = bp_library.find(item[0])
-    # camera_bp = world.get_blueprint_library().find('sensor.camera.depth')
+    # item = ['sensor.camera.rgb', cc.Raw, 'Camera RGB', {}]
+    bp = bp_library.find('sensor.camera.rgb')
     bp.set_attribute('image_size_x', str(width))
     bp.set_attribute('image_size_y', str(height))
     bp.set_attribute('fov', '70')
-    bp.set_attribute('sensor_tick', str(1/fps))
+    bp.set_attribute('shutter_speed', '60')
+    bp.set_attribute('chromatic_aberration_intensity', '0.5')
+    bp.set_attribute('motion_blur_intensity', '0.45')
+    # bp.set_attribute()
+    # bp.set_attribute()
+    
+    
+    # bp.set_attribute('sensor_tick', str(1))
+    # bp.set_attribute('enable_postprocess_effects', 'False')
   
     if bp.has_attribute('gamma'):
         bp.set_attribute('gamma', str(gamma))
-    for attr_name, attr_value in item[3].items():
-        bp.set_attribute(attr_name, attr_value)
-
+    
     camera = world.spawn_actor(
         bp,
         carla.Transform(carla.Location(x=1.6, z=1.7)),
@@ -112,14 +122,37 @@ def carla_image_to_numpy(data):
 
 def save_video(images, filepath, fps):
     
+    path = 'frames-{0:%Y_%m_%d-%H_%M_%S}'.format(datetime.now())
+    os.mkdir(path)
+    
     resolution = (WIDTH, HEIGHT)
-    vwriter = cv.VideoWriter(filepath, VideoWriter_fourcc(*'mp4v'), fps,
-                            resolution)
-    for data in images:
+
+    vwriter = cv.VideoWriter(os.path.join(path, filepath), VideoWriter_fourcc(*'mp4v'), fps,resolution)
+    vwriter_new_position = cv.VideoWriter(os.path.join(path, 'output_position.mp4'), VideoWriter_fourcc(*'mp4v'), fps,resolution)
+
+    location_history = []
+    for i, (data, location, transform) in enumerate(images):
+        # logging.debug(f"frame: {data.frame} timestamp: {data.timestamp}")
         image = carla_image_to_numpy(data)
+        cv.imwrite(os.path.join(path, "{:04d}.jpg".format(i)), image)
+
+        message = f"{i:04d}: location: {location.x:.03f}, {location.y:.03f}, {location.z:.03f},  transform.location: ({transform.location.x:0.3f}, {transform.location.y:0.3f}, {transform.location.z:0.3f}), transform.rotation: ({transform.rotation.pitch:0.3f}, {transform.rotation.yaw:0.3f}, {transform.rotation.roll:0.3f})"
+        if location_history and location_history[0] == location:
+            location_history.append(location)
+            if len(location_history) > 2:
+                logging.debug(f"\033[1;31;48m{message}'\033[1;37;0m'")
+            else:
+                logging.debug(f"\033[1;32;48m{message}'\033[1;37;0m'")
+        else:
+            location_history = [location]
+            logging.debug(message)
+            vwriter_new_position.write(image)
         vwriter.write(image)
 
     vwriter.release()
+    vwriter_new_position.release()
+
+
 class Recorder(object):
 
     def __init__(self, map):
@@ -144,8 +177,11 @@ class Recorder(object):
         self.vehicle.set_autopilot(True)
 
     def _set_world_setting(self, fps):
+        """
+        - [A question on fixed_delta_seconds of synchronous_mode](https://github.com/carla-simulator/carla/issues/3479)
+        """
         settings = self.world.get_settings()
-        settings.fixed_delta_seconds = (1.0 / fps)
+        # settings.fixed_delta_seconds = (1.0 / fps)
         self.world.apply_settings(settings)
 
 
@@ -189,8 +225,10 @@ class Recorder(object):
         if not self: 
             print(f'self is None: {self}')
             return
-
-        self.images.append(data)
+        
+        location: carla.Location = self.vehicle.get_location()
+        transform: carla.Transform = self.vehicle.get_transform()
+        self.images.append((data, location, transform))
         
 
 def main():
@@ -210,12 +248,12 @@ def main():
     # recorder = Recorder(map='/Game/Carla/Maps/Town07_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town06',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town01_Opt',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town01',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town05',)
+    # recorder = Recorder(map='/Game/Carla/Maps/Town01',)
     recorder = Recorder(map='/Game/Carla/Maps/Town05_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town02_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town03')
-    recorder.record(filepath='output.mp4', fps=30, duration_in_second=60, height=720, width=1280, gamma=2.2,)
+    recorder.record(filepath='output.mp4', fps=30, duration_in_second=30, height=720, width=1280, gamma=2.2,)
         
 
 if __name__ == '__main__':
