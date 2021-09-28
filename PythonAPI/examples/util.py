@@ -17,9 +17,16 @@ def get_linear_velocity_in_kph(v: "carla.libcarla.Vector3D") -> float:
 
 
 def destroy_vehicles(world: "carla.libcarla.World"):
-    for vehicle in world.get_actors().filter("vehicle.*"):
-        vehicle.destroy()
+    for actor in world.get_actors().filter("vehicle.*"):
+        actor.destroy()
 
+def destroy_sensors(world: "carla.libcarla.World"):
+    for actor in world.get_actors().filter("sensor.*"):
+        actor.destroy()
+
+def print_all_actors(world: "carla.libcarla.World"):
+    for actor in world.get_actors():
+        print(actor)
 
 def set_target_velocity(
     vehicle: "carla.Actor.", velocity_in_kph: "carla.libcarla.Vector3D"

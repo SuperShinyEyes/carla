@@ -15,6 +15,8 @@ import glob
 import os
 import sys
 
+import queue
+
 try:
     sys.path.append(
         glob.glob(
@@ -58,6 +60,7 @@ from cv2 import (
     VideoWriter_fourcc,
 )
 import cv2 as cv
+import tqdm
 
 import util
 
@@ -100,13 +103,13 @@ def get_vehicle(world):
     return vehicle
 
 
-def get_camera(world, parent_actor, height, width, gamma, fps):
-    """Configure camera
+def get_camera(world, parent_actor, height, width, gamma):
+    """Configure camera just like Openpilot
+    - https://github.com/SuperShinyEyes/openpilot/blob/204e5a090735a059d69c29145a4cee49450da07e/tools/sim/bridge.py#L194-L198
     - https://carla.readthedocs.io/en/0.9.11/ref_sensors/#rgb-camera
     - https://carla.readthedocs.io/en/0.9.11/ref_sensors/#advanced-camera-attributes
     """
     bp_library = world.get_blueprint_library()
-    # item = ['sensor.camera.rgb', cc.Raw, 'Camera RGB', {}]
     bp = bp_library.find("sensor.camera.rgb")
     bp.set_attribute("image_size_x", str(width))
     bp.set_attribute("image_size_y", str(height))
@@ -114,11 +117,7 @@ def get_camera(world, parent_actor, height, width, gamma, fps):
     bp.set_attribute("shutter_speed", "60")
     bp.set_attribute("chromatic_aberration_intensity", "0.5")
     bp.set_attribute("motion_blur_intensity", "0.45")
-    # bp.set_attribute()
-    # bp.set_attribute()
-
-    # bp.set_attribute('sensor_tick', str(1))
-    # bp.set_attribute('enable_postprocess_effects', 'False')
+    # bp.set_attribute('sensor_tick', '0.033')
 
     if bp.has_attribute("gamma"):
         bp.set_attribute("gamma", str(gamma))
@@ -163,14 +162,63 @@ def save_video(images, filepath, fps):
         os.path.join(path, filepath), VideoWriter_fourcc(*"mp4v"), fps, resolution
     )
 
-    for i, (data, location, transform) in enumerate(images):
+    for data in tqdm.tqdm(images):
         image = carla_image_to_numpy(data)
-        cv.imwrite(os.path.join(path, "{:04d}.jpg".format(i)), image)
-
-        message = f"{i:04d}: location: {location.x:.03f}, {location.y:.03f}, {location.z:.03f},  transform.location: ({transform.location.x:0.3f}, {transform.location.y:0.3f}, {transform.location.z:0.3f}), transform.rotation: ({transform.rotation.pitch:0.3f}, {transform.rotation.yaw:0.3f}, {transform.rotation.roll:0.3f})"
+        # cv.imwrite(os.path.join(path, "{:04d}.jpg".format(i)), image)
         vwriter.write(image)
 
     vwriter.release()
+
+class CarlaSyncMode(object):
+    """
+    Context manager to synchronize output from different sensors. Synchronous
+    mode is enabled as long as we are inside this context
+
+        with CarlaSyncMode(world, sensors) as sync_mode:
+            while True:
+                data = sync_mode.tick(timeout=1.0)
+
+    """
+
+    def __init__(self, world, *sensors, **kwargs):
+        self.world = world
+        self.sensors = sensors
+        self.frame = None
+        self.delta_seconds = 1.0 / kwargs.get('fps', 20)
+        self._queues = []
+        self._settings = None
+
+    def __enter__(self):
+        self._settings = self.world.get_settings()
+        self.frame = self.world.apply_settings(carla.WorldSettings(
+            no_rendering_mode=False,
+            synchronous_mode=True,
+            fixed_delta_seconds=self.delta_seconds))
+
+        def make_queue(register_event):
+            q = queue.Queue()
+            register_event(q.put)
+            self._queues.append(q)
+
+        make_queue(self.world.on_tick)
+        for sensor in self.sensors:
+            make_queue(sensor.listen)
+        return self
+
+    def tick(self, timeout):
+        self.frame = self.world.tick()
+        data = [self._retrieve_data(q, timeout) for q in self._queues]
+        assert all(x.frame == self.frame for x in data)
+        return data
+
+    def __exit__(self, *args, **kwargs):
+        self.world.apply_settings(self._settings)
+
+    def _retrieve_data(self, sensor_queue, timeout):
+        while True:
+            data = sensor_queue.get(timeout=timeout)
+            if data.frame == self.frame:
+                return data
 
 
 class Recorder(object):
@@ -195,8 +243,12 @@ class Recorder(object):
         logging.info(f"Warm up for {seconds} seconds.")
         time.sleep(seconds)
 
+    def _should_quit(self, fps, duration_in_second) -> bool:
+        target_n_frames = fps * duration_in_second
+        return len(self.images) >= target_n_frames
+
     def record(self, filepath, fps, duration_in_second, height, width, gamma):
-        self._set_world_setting(fps)
+        
         self.vehicle = get_vehicle(self.world)
 
         camera = get_camera(
@@ -205,46 +257,44 @@ class Recorder(object):
             height=height,
             width=width,
             gamma=gamma,
-            fps=fps,
         )
         print(camera)
         logging.info(
             f"Capture video; fps={fps}, duration_in_second={duration_in_second}, resolution={width}x{height}"
         )
+        self._warmup(seconds=2)
+        
         ############################
         # Capture video
-        self._warmup(seconds=1)
         _start = time.perf_counter()
-        weak_self = weakref.ref(self)
-        camera.listen(lambda data: Recorder.buffer_camera_data(weak_self, data))
+        target_n_frames = fps * duration_in_second
+        with CarlaSyncMode(self.world, camera, fps=fps) as sync_mode:
+            logging.info(f"Simulating for {duration_in_second} seconds")
+            for _ in tqdm.tqdm(range(target_n_frames)):
+                # Advance the simulation and wait for the data.
+                snapshot, camera_data,  = sync_mode.tick(timeout=2.0)
 
-        time.sleep(duration_in_second)
+                self.images.append(camera_data)
+
+                fps_server = round(1.0 / snapshot.timestamp.delta_seconds)
+                # logging.debug('% 5d FPS (simulated)' % fps_server)
+
 
         _end = time.perf_counter()
         print(
             f"Simulation of {duration_in_second} seconds took {_end - _start:.2f} seconds."
         )
-        if camera is not None:
-            camera.destroy()
 
         ############################
 
         save_video(images=self.images, filepath=filepath, fps=fps)
         self.images = []
 
-        print("Destroy the car")
+    def destroy(self):
+        logging.debug("Destroy the cars and cameras")
         util.destroy_vehicles(self.world)
-
-    @staticmethod
-    def buffer_camera_data(weak_self, data):
-        self = weak_self()
-        if not self:
-            print(f"self is None: {self}")
-            return
-
-        location: carla.Location = self.vehicle.get_location()
-        transform: carla.Transform = self.vehicle.get_transform()
-        self.images.append((data, location, transform))
+        util.destroy_sensors(self.world)
+        
 
 
 def main():
@@ -271,14 +321,19 @@ def main():
     )
     # recorder = Recorder(map='/Game/Carla/Maps/Town02_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town03')
-    recorder.record(
-        filepath="output.mp4",
-        fps=15,
-        duration_in_second=5,
-        height=720,
-        width=1280,
-        gamma=2.2,
-    )
+    try:
+        recorder.record(
+            filepath="output.mp4",
+            fps=30,
+            duration_in_second=5,
+            height=720,
+            width=1280,
+            gamma=2.2,
+        )
+    except Exception as e:
+        print(e)
+    finally:
+        recorder.destroy()
 
 
 if __name__ == "__main__":
