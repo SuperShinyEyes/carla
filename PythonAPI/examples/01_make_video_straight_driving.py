@@ -16,10 +16,16 @@ import os
 import sys
 
 try:
-    sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
-        sys.version_info.major,
-        sys.version_info.minor,
-        'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
+    sys.path.append(
+        glob.glob(
+            "../carla/dist/carla-*%d.%d-%s.egg"
+            % (
+                sys.version_info.major,
+                sys.version_info.minor,
+                "win-amd64" if os.name == "nt" else "linux-x86_64",
+            )
+        )[0]
+    )
 except IndexError:
     pass
 
@@ -31,6 +37,7 @@ except IndexError:
 
 import carla
 from carla import ColorConverter as cc
+
 Attachment = carla.AttachmentType
 
 import weakref
@@ -41,33 +48,42 @@ import random
 from datetime import datetime
 
 import numpy as np
-from cv2 import (CAP_PROP_FOURCC, CAP_PROP_FPS, CAP_PROP_FRAME_COUNT,
-                 CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH,
-                 CAP_PROP_POS_FRAMES, VideoWriter_fourcc)
+from cv2 import (
+    CAP_PROP_FOURCC,
+    CAP_PROP_FPS,
+    CAP_PROP_FRAME_COUNT,
+    CAP_PROP_FRAME_HEIGHT,
+    CAP_PROP_FRAME_WIDTH,
+    CAP_PROP_POS_FRAMES,
+    VideoWriter_fourcc,
+)
 import cv2 as cv
+
+import util
 
 images = []
 WIDTH, HEIGHT = 1280, 720
 RECORD_LENGTH_IN_SEC = 60
 
+
 def get_vehicle(world):
-    bp = world.get_blueprint_library().filter('model3')[0]
+    bp = world.get_blueprint_library().filter("model3")[0]
     print(bp)
-    bp.set_attribute('role_name', 'vehicle')
-    if bp.has_attribute('is_invincible'):
-        bp.set_attribute('is_invincible', 'true')
+    bp.set_attribute("role_name", "vehicle")
+    if bp.has_attribute("is_invincible"):
+        bp.set_attribute("is_invincible", "true")
     # Spawn the player.
     spawn_points = world.get_map().get_spawn_points()
-    spawn_point = random.choice(spawn_points) 
+    # spawn_point = random.choice(spawn_points)
+    spawn_point = spawn_points[0]
     vehicle = world.spawn_actor(bp, spawn_point)
-    
+
     # vehicle.apply_control(carla.VehicleControl(throttle=1.0, steer=0))
-    
+
     # physics_control = vehicle.get_physics_control()
     # physics_control.use_sweep_wheel_collision = True
     # vehicle.apply_physics_control(physics_control)
 
-    
     # Vehicle physics setting from Openpilot make tires less slippery
     # wheel_control = carla.WheelPhysicsControl(tire_friction=5)
     physics_control = vehicle.get_physics_control()
@@ -77,8 +93,12 @@ def get_vehicle(world):
     physics_control.gear_switch_time = 0.0
     vehicle.apply_physics_control(physics_control)
 
-
+    # control = carla.VehicleControl()
+    # control.throttle = 10
+    # vehicle.apply_control(control)
+    set_target_velocity(vehicle, carla.libcarla.Vector3D(-60, 0, 0))
     return vehicle
+
 
 def get_camera(world, parent_actor, height, width, gamma, fps):
     """Configure camera
@@ -87,23 +107,22 @@ def get_camera(world, parent_actor, height, width, gamma, fps):
     """
     bp_library = world.get_blueprint_library()
     # item = ['sensor.camera.rgb', cc.Raw, 'Camera RGB', {}]
-    bp = bp_library.find('sensor.camera.rgb')
-    bp.set_attribute('image_size_x', str(width))
-    bp.set_attribute('image_size_y', str(height))
-    bp.set_attribute('fov', '70')
-    bp.set_attribute('shutter_speed', '60')
-    bp.set_attribute('chromatic_aberration_intensity', '0.5')
-    bp.set_attribute('motion_blur_intensity', '0.45')
+    bp = bp_library.find("sensor.camera.rgb")
+    bp.set_attribute("image_size_x", str(width))
+    bp.set_attribute("image_size_y", str(height))
+    bp.set_attribute("fov", "70")
+    bp.set_attribute("shutter_speed", "60")
+    bp.set_attribute("chromatic_aberration_intensity", "0.5")
+    bp.set_attribute("motion_blur_intensity", "0.45")
     # bp.set_attribute()
     # bp.set_attribute()
-    
-    
+
     # bp.set_attribute('sensor_tick', str(1))
     # bp.set_attribute('enable_postprocess_effects', 'False')
-  
-    if bp.has_attribute('gamma'):
-        bp.set_attribute('gamma', str(gamma))
-    
+
+    if bp.has_attribute("gamma"):
+        bp.set_attribute("gamma", str(gamma))
+
     camera = world.spawn_actor(
         bp,
         carla.Transform(carla.Location(x=1.6, z=1.7)),
@@ -113,6 +132,19 @@ def get_camera(world, parent_actor, height, width, gamma, fps):
     print("Attached camera")
     return camera
 
+
+def set_target_velocity(
+    vehicle: "carla.Actor", velocity_in_kph: "carla.libcarla.Vector3D"
+):
+    velocity_in_mps = carla.libcarla.Vector3D(
+        velocity_in_kph.x / 3.6,
+        velocity_in_kph.y / 3.6,
+        velocity_in_kph.z / 3.6,
+    )
+
+    vehicle.set_target_velocity(velocity_in_mps)
+
+
 def carla_image_to_numpy(data):
     data.convert(cc.Raw)
     image = np.frombuffer(data.raw_data, dtype=np.dtype("uint8"))
@@ -120,61 +152,36 @@ def carla_image_to_numpy(data):
     image = image[:, :, :3]
     return image
 
+
 def save_video(images, filepath, fps):
-    
-    path = 'frames-{0:%Y_%m_%d-%H_%M_%S}'.format(datetime.now())
+
+    path = "frames-{0:%Y_%m_%d-%H_%M_%S}".format(datetime.now())
     os.mkdir(path)
-    
     resolution = (WIDTH, HEIGHT)
 
-    vwriter = cv.VideoWriter(os.path.join(path, filepath), VideoWriter_fourcc(*'mp4v'), fps,resolution)
-    vwriter_new_position = cv.VideoWriter(os.path.join(path, 'output_position.mp4'), VideoWriter_fourcc(*'mp4v'), fps,resolution)
+    vwriter = cv.VideoWriter(
+        os.path.join(path, filepath), VideoWriter_fourcc(*"mp4v"), fps, resolution
+    )
 
-    location_history = []
     for i, (data, location, transform) in enumerate(images):
-        # logging.debug(f"frame: {data.frame} timestamp: {data.timestamp}")
         image = carla_image_to_numpy(data)
         cv.imwrite(os.path.join(path, "{:04d}.jpg".format(i)), image)
 
         message = f"{i:04d}: location: {location.x:.03f}, {location.y:.03f}, {location.z:.03f},  transform.location: ({transform.location.x:0.3f}, {transform.location.y:0.3f}, {transform.location.z:0.3f}), transform.rotation: ({transform.rotation.pitch:0.3f}, {transform.rotation.yaw:0.3f}, {transform.rotation.roll:0.3f})"
-        if location_history and location_history[0] == location:
-            location_history.append(location)
-            if len(location_history) > 2:
-                logging.debug(f"\033[1;31;48m{message}'\033[1;37;0m'")
-            else:
-                logging.debug(f"\033[1;32;48m{message}'\033[1;37;0m'")
-        else:
-            location_history = [location]
-            logging.debug(message)
-            vwriter_new_position.write(image)
         vwriter.write(image)
 
     vwriter.release()
-    vwriter_new_position.release()
 
 
 class Recorder(object):
-
     def __init__(self, map):
         self.images = []
         self.vehicle = None
-        
-        self.client = carla.Client('localhost', 2000)
-        self.client.set_timeout(3.0)
-        
-        # self.client.load_world(map)
-        # self.client.reload_world()
 
+        self.client = carla.Client("localhost", 2000)
+        self.client.set_timeout(3.0)
         self.world = self.client.get_world()
 
-        # Enable autopilot
-        traffic_manager = self.client.get_trafficmanager(8000)
-        # traffic_manager.set_global_distance_to_leading_vehicle(1.0)
-        # traffic_manager.ignore_lights_percentage(vehicle,100)
-        traffic_manager.set_hybrid_physics_mode(True)
-
-        self.vehicle = get_vehicle(self.world)
-        self.vehicle.set_autopilot(True)
 
     def _set_world_setting(self, fps):
         """
@@ -184,28 +191,39 @@ class Recorder(object):
         # settings.fixed_delta_seconds = (1.0 / fps)
         self.world.apply_settings(settings)
 
+    def _warmup(self, seconds=2):
+        logging.info(f"Warm up for {seconds} seconds.")
+        time.sleep(seconds)
 
     def record(self, filepath, fps, duration_in_second, height, width, gamma):
         self._set_world_setting(fps)
-        max_n_frame = fps * duration_in_second
-        
-        camera = get_camera(self.world, parent_actor=self.vehicle, height=height, width=width, gamma=gamma, fps=fps)
+        self.vehicle = get_vehicle(self.world)
+
+        camera = get_camera(
+            self.world,
+            parent_actor=self.vehicle,
+            height=height,
+            width=width,
+            gamma=gamma,
+            fps=fps,
+        )
         print(camera)
-        logging.info(f"Capture video; fps={fps}, duration_in_second={duration_in_second}, resolution={width}x{height}")
+        logging.info(
+            f"Capture video; fps={fps}, duration_in_second={duration_in_second}, resolution={width}x{height}"
+        )
         ############################
         # Capture video
-        time.sleep(1)   # Wait until autopilot kicks in properly
+        self._warmup(seconds=1)
         _start = time.perf_counter()
         weak_self = weakref.ref(self)
         camera.listen(lambda data: Recorder.buffer_camera_data(weak_self, data))
 
-        while 1:
-            if len(self.images) >= max_n_frame:
-                break
-            time.sleep(0.1)
+        time.sleep(duration_in_second)
 
         _end = time.perf_counter()
-        print(f"Simulation of {duration_in_second} seconds took {_end - _start:.2f} seconds.")
+        print(
+            f"Simulation of {duration_in_second} seconds took {_end - _start:.2f} seconds."
+        )
         if camera is not None:
             camera.destroy()
 
@@ -214,26 +232,24 @@ class Recorder(object):
         save_video(images=self.images, filepath=filepath, fps=fps)
         self.images = []
 
-    def __del__(self, *args):
         print("Destroy the car")
-        if self.vehicle is not None:
-            carla.command.DestroyActor(self.vehicle)
+        util.destroy_vehicles(self.world)
 
     @staticmethod
     def buffer_camera_data(weak_self, data):
         self = weak_self()
-        if not self: 
-            print(f'self is None: {self}')
+        if not self:
+            print(f"self is None: {self}")
             return
-        
+
         location: carla.Location = self.vehicle.get_location()
         transform: carla.Transform = self.vehicle.get_transform()
         self.images.append((data, location, transform))
-        
+
 
 def main():
     log_level = logging.DEBUG if True else logging.INFO
-    logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
+    logging.basicConfig(format="%(levelname)s: %(message)s", level=log_level)
 
     print(__doc__)
 
@@ -250,12 +266,21 @@ def main():
     # recorder = Recorder(map='/Game/Carla/Maps/Town01_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town05',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town01',)
-    recorder = Recorder(map='/Game/Carla/Maps/Town05_Opt',)
+    recorder = Recorder(
+        map="/Game/Carla/Maps/Town05_Opt",
+    )
     # recorder = Recorder(map='/Game/Carla/Maps/Town02_Opt',)
     # recorder = Recorder(map='/Game/Carla/Maps/Town03')
-    recorder.record(filepath='output.mp4', fps=30, duration_in_second=30, height=720, width=1280, gamma=2.2,)
-        
+    recorder.record(
+        filepath="output.mp4",
+        fps=15,
+        duration_in_second=5,
+        height=720,
+        width=1280,
+        gamma=2.2,
+    )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
 
     main()
