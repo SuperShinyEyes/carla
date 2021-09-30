@@ -1,7 +1,39 @@
 #!/usr/bin/env python
 
 """
-Record a video file
+Make a batch of five-second videos of car driving at 60 kph with 
+varying camera orientation; yaw and pitch.
+
+In every video a car,
+
+- starts from a same location, and 
+- drives toward a same direction straight at constant speed (60 kph).
+
+THE ONLY variables are camera yaw and pitch.
+Yaw and Pitch are randomly generated from a common range.
+
+You can try different maps. First go to ../util/
+
+    $ ./config.py --map Town10HD
+    $ ./config.py --map Town04_Opt
+    $ ./config.py --map Town10HD_Opt
+    $ ./config.py --map Town07
+    $ ./config.py --map Town04
+    $ ./config.py --map Town02
+    $ ./config.py --map Town06_Opt
+    $ ./config.py --map Town03_Opt
+    $ ./config.py --map Town07_Opt
+    $ ./config.py --map Town06
+    $ ./config.py --map Town01_Opt
+    $ ./config.py --map Town05
+    $ ./config.py --map Town02_Opt
+    $ ./config.py --map Town0
+    $ ./config.py --map Town01
+
+You can't kill this process with KeyboardInterrupt. 
+Send a sigkill.
+
+------------------------------------
 """
 from __future__ import print_function
 
@@ -42,52 +74,47 @@ from carla import ColorConverter as cc
 
 Attachment = carla.AttachmentType
 
+import argparse
 from typing import *
 import time
 import logging
 import random
 from pathlib import Path
 from datetime import datetime
-import random; random.seed(1)
+import random
+
+random.seed(1)
 
 import numpy as np
 from numpy import ndarray
 
 from cv2 import VideoWriter_fourcc
 import cv2 as cv
-import tqdm
 
 import util
 
-images = []
-WIDTH, HEIGHT = 1280, 720
 
 def get_vehicle(world, spawn_point: "carla.Transform"):
     bp = world.get_blueprint_library().filter("model3")[0]
-    print(bp)
     bp.set_attribute("role_name", "vehicle")
     if bp.has_attribute("is_invincible"):
         bp.set_attribute("is_invincible", "true")
-    
+
     vehicle = world.spawn_actor(bp, spawn_point)
-
-    # vehicle.apply_control(carla.VehicleControl(throttle=1.0, steer=0))
-
-    # physics_control = vehicle.get_physics_control()
-    # physics_control.use_sweep_wheel_collision = True
-    # vehicle.apply_physics_control(physics_control)
-
-    # Vehicle physics setting from Openpilot make tires less slippery
-    # wheel_control = carla.WheelPhysicsControl(tire_friction=5)
     physics_control = vehicle.get_physics_control()
     physics_control.mass = 2326
-    # physics_control.wheels = [wheel_control]*4
     physics_control.torque_curve = [[20.0, 500.0], [5000.0, 500.0]]
     physics_control.gear_switch_time = 0.0
     vehicle.apply_physics_control(physics_control)
 
-    
     return vehicle
+
+
+def get_camera_transform(yaw: float, pitch: float) -> "carla.Transform":
+    return carla.Transform(
+        carla.Location(x=1.6, z=1.7),
+        carla.Rotation(pitch=pitch, yaw=yaw),
+    )
 
 
 def get_camera(world, parent_actor, height, width, gamma, yaw, pitch):
@@ -104,18 +131,13 @@ def get_camera(world, parent_actor, height, width, gamma, yaw, pitch):
     bp.set_attribute("shutter_speed", "60")
     bp.set_attribute("chromatic_aberration_intensity", "0.5")
     bp.set_attribute("motion_blur_intensity", "0.45")
-    # bp.set_attribute('sensor_tick', '0.033')
 
     if bp.has_attribute("gamma"):
         bp.set_attribute("gamma", str(gamma))
 
-    camera_transform = carla.Transform(
-        carla.Location(x=1.6, z=1.7),
-        carla.Rotation(pitch=pitch, yaw=yaw),
-    )
     camera = world.spawn_actor(
         bp,
-        camera_transform,
+        get_camera_transform(yaw, pitch),
         attach_to=parent_actor,
     )
     return camera
@@ -141,15 +163,16 @@ def carla_camera_data_to_numpy(data) -> ndarray:
     return image
 
 
-def save_video(camera_data: List, video_path: str, fps: int, resolution: Tuple[int, int]):
-    vwriter = cv.VideoWriter(
-        video_path, VideoWriter_fourcc(*"mp4v"), fps, resolution
-    )
+def save_video(
+    camera_data: List, video_path: str, fps: int, resolution: Tuple[int, int]
+):
+    vwriter = cv.VideoWriter(video_path, VideoWriter_fourcc(*"mp4v"), fps, resolution)
 
     for data in camera_data:
         vwriter.write(carla_camera_data_to_numpy(data))
 
     vwriter.release()
+
 
 class CarlaSyncMode(object):
     """
@@ -173,10 +196,12 @@ class CarlaSyncMode(object):
 
     def __enter__(self):
         self._settings = self.world.get_settings()
-        self.frame = self.world.apply_settings(carla.WorldSettings(
-            no_rendering_mode=False,
-            synchronous_mode=True,
-            fixed_delta_seconds=self.delta_seconds)
+        self.frame = self.world.apply_settings(
+            carla.WorldSettings(
+                no_rendering_mode=False,
+                synchronous_mode=True,
+                fixed_delta_seconds=self.delta_seconds,
+            )
         )
 
         q = queue.Queue()
@@ -197,7 +222,6 @@ class CarlaSyncMode(object):
 
     def __exit__(self, *args, **kwargs):
         """
-        
         About deregistering world tick: https://github.com/carla-simulator/carla/pull/1865
         """
         assert self._world_tick_id is not None
@@ -214,7 +238,9 @@ class CarlaSyncMode(object):
 
 
 class Recorder(object):
-    def __init__(self, fps, duration_in_second, height, width, vehicle_transform, gamma):
+    def __init__(
+        self, fps, duration_in_second, height, width, vehicle_transform, gamma
+    ):
         self.camera_data: List["carla.Image"] = []
         self.vehicle = None
         self.fps: int = fps
@@ -225,6 +251,7 @@ class Recorder(object):
         self.resolution = (width, height)  # OpenCV VideoWriter format
         self.duration_in_second = duration_in_second
         self.target_n_frames = fps * duration_in_second
+        self.camera = None
 
         self.client = carla.Client("localhost", 2000)
         self.client.set_timeout(3.0)
@@ -235,34 +262,30 @@ class Recorder(object):
             f"Capture video; fps={fps}, duration_in_second={duration_in_second}, resolution={width}x{height}"
         )
 
-    def _set_world_setting(self, fps):
-        """
-        - [A question on fixed_delta_seconds of synchronous_mode](https://github.com/carla-simulator/carla/issues/3479)
-        """
-        settings = self.world.get_settings()
-        # settings.fixed_delta_seconds = (1.0 / fps)
-        self.world.apply_settings(settings)
-
     def _warmup(self, seconds=2):
-        logging.info(f"Warm up for {seconds} seconds.")
+        """Sleep for vehicle to stabilize"""
         time.sleep(seconds)
 
     def _reset_camera(self, yaw: float, pitch: float):
-        assert self.vehicle is not None 
+        assert self.vehicle is not None
         assert self.vehicle.is_alive
-        util.destroy_sensors(self.world)
-        self.camera = get_camera(
-            self.world,
-            parent_actor=self.vehicle,
-            height=self.height,
-            width=self.width,
-            gamma=self.gamma,
-            yaw=yaw,
-            pitch=pitch
-        )
+
+        if self.camera is None:
+            self.camera = get_camera(
+                self.world,
+                parent_actor=self.vehicle,
+                height=self.height,
+                width=self.width,
+                gamma=self.gamma,
+                yaw=yaw,
+                pitch=pitch,
+            )
+        else:
+            self.camera.set_transform(get_camera_transform(yaw, pitch))
 
     def _reset_car(self):
         """Reset car transform (orientation and position) and velocity.
+
         - [Is there any way to change position when player vehicle is running?](https://github.com/carla-simulator/carla/issues/595)
         """
         self.vehicle.set_transform(self.vehicle_transform)
@@ -271,16 +294,16 @@ class Recorder(object):
     def reset(self, yaw: float, pitch: float):
         self._reset_car()
         self._reset_camera(yaw, pitch)
+        self.camera_data.clear()
 
     def record(self, output_path: str, yaw: float, pitch: float):
         self.reset(yaw, pitch)
         self._warmup(seconds=2)
-        
         ############################
         # Capture video
         print(f"Simulating {output_path}")
         _start = time.perf_counter()
-        
+
         with CarlaSyncMode(self.world, self.camera, fps=self.fps) as sync_mode:
             for _ in range(self.target_n_frames):
                 # Advance the simulation and wait for the data.
@@ -295,14 +318,15 @@ class Recorder(object):
         ############################
 
         save_video(self.camera_data, output_path, self.fps, self.resolution)
-        self.camera_data.clear()
-
 
     def destroy(self):
         logging.info("Destroy the cars and cameras")
         util.destroy_vehicles(self.world)
         util.destroy_sensors(self.world)
-        
+
+    def __del__(self):
+        self.destroy()
+
 
 def _make_dataset_directory() -> Path:
     path = "camera_yaw_pitch_dataset-{0:%Y_%m_%d-%H_%M_%S}".format(datetime.now())
@@ -310,11 +334,21 @@ def _make_dataset_directory() -> Path:
     path.mkdir()
     return path
 
+
 def get_random_angle() -> float:
     """Return a random angle (in degree) in the range [-20, +20] rounded by second decimal."""
-    return round(random.uniform(-20,20), 2)
+    return round(random.uniform(-20, 20), 2)
 
-def main(n_video: int, height, width, fps, duration_in_second, vehicle_transform: "carla.Transform", gamma=2.2):
+
+def main(
+    n_video: int,
+    height,
+    width,
+    fps,
+    duration_in_second,
+    vehicle_transform: "carla.Transform",
+    gamma=2.2,
+):
 
     dataset_path: Path = _make_dataset_directory()
     video_name_template = "{index:03d}-pitch={pitch}-yaw={yaw}.mp4"
@@ -334,36 +368,38 @@ def main(n_video: int, height, width, fps, duration_in_second, vehicle_transform
         video_name = video_name_template.format(index=i, pitch=pitch, yaw=yaw)
         video_path: str = str(dataset_path / video_name)
 
-        assert not os.path.exists(video_path), f'{video_path} exists already!'
+        assert not os.path.exists(video_path), f"{video_path} exists already!"
 
         try:
             recorder.record(video_path, yaw=yaw, pitch=pitch)
         except Exception as e:
             print(e)
-            recorder.destroy()
             return
-        finally:
-            pass
 
 
 if __name__ == "__main__":
+    print(__doc__)
+
+    argparser = argparse.ArgumentParser(description="Car yaw pitch dataset generator")
+    argparser.add_argument(
+        "-n", "--num_video", type=int, help="Number of videos to generate"
+    )
+    args = argparser.parse_args()
+    assert (
+        args.num_video is not None
+    ), "Provide a batch size!. e.g. ./01_make_video_straight_driving.py -n 100"
+
     log_level = logging.DEBUG if True else logging.INFO
     logging.basicConfig(format="%(levelname)s: %(message)s", level=log_level)
 
-    """
-    # Spawn the player.
-    spawn_points = world.get_map().get_spawn_points()
-    # spawn_point = random.choice(spawn_points)
-    spawn_point = spawn_points[0]
-    
-    """
     vehicle_transform: "carla.Transform" = carla.Transform(
-        carla.Location(x=586.8056030273438, y=-10.063207626342773, z=0.29999998211860657),
+        carla.Location(
+            x=586.8056030273438, y=-10.063207626342773, z=0.29999998211860657
+        ),
         carla.Rotation(yaw=-179.58056640625),
     )
-    num_videos = 100
     main(
-        n_video=num_videos,
+        n_video=args.num_video,
         fps=30,
         duration_in_second=5,
         height=720,
@@ -371,19 +407,3 @@ if __name__ == "__main__":
         gamma=2.2,
         vehicle_transform=vehicle_transform,
     )
-
-    # recorder = Recorder(map='/Game/Carla/Maps/Town10HD',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town04_Opt',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town10HD_Opt',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town07',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town04',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town02',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town06_Opt',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town03_Opt',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town07_Opt',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town06',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town01_Opt',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town05',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town02_Opt',)
-    # recorder = Recorder(map='/Game/Carla/Maps/Town03')
-    # recorder = Recorder(map='/Game/Carla/Maps/Town01',)
