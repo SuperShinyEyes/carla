@@ -62,16 +62,13 @@ import util
 images = []
 WIDTH, HEIGHT = 1280, 720
 
-def get_vehicle(world):
+def get_vehicle(world, spawn_point: "carla.Transform"):
     bp = world.get_blueprint_library().filter("model3")[0]
     print(bp)
     bp.set_attribute("role_name", "vehicle")
     if bp.has_attribute("is_invincible"):
         bp.set_attribute("is_invincible", "true")
-    # Spawn the player.
-    spawn_points = world.get_map().get_spawn_points()
-    # spawn_point = random.choice(spawn_points)
-    spawn_point = spawn_points[0]
+    
     vehicle = world.spawn_actor(bp, spawn_point)
 
     # vehicle.apply_control(carla.VehicleControl(throttle=1.0, steer=0))
@@ -93,7 +90,7 @@ def get_vehicle(world):
     return vehicle
 
 
-def get_camera(world, parent_actor, height, width, gamma):
+def get_camera(world, parent_actor, height, width, gamma, yaw, pitch):
     """Configure camera just like Openpilot 0.8.8
     - https://github.com/SuperShinyEyes/openpilot/blob/204e5a090735a059d69c29145a4cee49450da07e/tools/sim/bridge.py#L194-L198
     - https://carla.readthedocs.io/en/0.9.11/ref_sensors/#rgb-camera
@@ -112,11 +109,14 @@ def get_camera(world, parent_actor, height, width, gamma):
     if bp.has_attribute("gamma"):
         bp.set_attribute("gamma", str(gamma))
 
+    camera_transform = carla.Transform(
+        carla.Location(x=1.6, z=1.7),
+        carla.Rotation(pitch=pitch, yaw=yaw),
+    )
     camera = world.spawn_actor(
         bp,
-        carla.Transform(carla.Location(x=1.6, z=1.7)),
+        camera_transform,
         attach_to=parent_actor,
-        # attachment=Attachment.Rigid,
     )
     return camera
 
@@ -146,7 +146,7 @@ def save_video(camera_data: List, video_path: str, fps: int, resolution: Tuple[i
         video_path, VideoWriter_fourcc(*"mp4v"), fps, resolution
     )
 
-    for data in tqdm.tqdm(camera_data):
+    for data in camera_data:
         vwriter.write(carla_camera_data_to_numpy(data))
 
     vwriter.release()
@@ -214,10 +214,14 @@ class CarlaSyncMode(object):
 
 
 class Recorder(object):
-    def __init__(self, fps, duration_in_second, height, width, gamma):
-        self.camera_data = []
+    def __init__(self, fps, duration_in_second, height, width, vehicle_transform, gamma):
+        self.camera_data: List["carla.Image"] = []
         self.vehicle = None
         self.fps: int = fps
+        self.height = height
+        self.width = width
+        self.gamma = gamma
+        self.vehicle_transform = vehicle_transform
         self.resolution = (width, height)  # OpenCV VideoWriter format
         self.duration_in_second = duration_in_second
         self.target_n_frames = fps * duration_in_second
@@ -226,15 +230,7 @@ class Recorder(object):
         self.client.set_timeout(3.0)
         self.world = self.client.get_world()
         self.vehicle_velocity = carla.libcarla.Vector3D(-60, 0, 0)
-        self.vehicle = get_vehicle(self.world)
-
-        self.camera = get_camera(
-            self.world,
-            parent_actor=self.vehicle,
-            height=height,
-            width=width,
-            gamma=gamma,
-        )
+        self.vehicle = get_vehicle(self.world, vehicle_transform)
         logging.info(
             f"Capture video; fps={fps}, duration_in_second={duration_in_second}, resolution={width}x{height}"
         )
@@ -251,14 +247,33 @@ class Recorder(object):
         logging.info(f"Warm up for {seconds} seconds.")
         time.sleep(seconds)
 
-    def reset_camera(self, yaw: float, pitch: float):
-        pass
+    def _reset_camera(self, yaw: float, pitch: float):
+        assert self.vehicle is not None 
+        assert self.vehicle.is_alive
+        util.destroy_sensors(self.world)
+        self.camera = get_camera(
+            self.world,
+            parent_actor=self.vehicle,
+            height=self.height,
+            width=self.width,
+            gamma=self.gamma,
+            yaw=yaw,
+            pitch=pitch
+        )
 
-    def reset_car(self):
+    def _reset_car(self):
+        """Reset car transform (orientation and position) and velocity.
+        - [Is there any way to change position when player vehicle is running?](https://github.com/carla-simulator/carla/issues/595)
+        """
+        self.vehicle.set_transform(self.vehicle_transform)
         set_target_velocity(self.vehicle, self.vehicle_velocity)
 
+    def reset(self, yaw: float, pitch: float):
+        self._reset_car()
+        self._reset_camera(yaw, pitch)
+
     def record(self, output_path: str, yaw: float, pitch: float):
-        self.reset_car()
+        self.reset(yaw, pitch)
         self._warmup(seconds=2)
         
         ############################
@@ -282,6 +297,7 @@ class Recorder(object):
         save_video(self.camera_data, output_path, self.fps, self.resolution)
         self.camera_data.clear()
 
+
     def destroy(self):
         logging.info("Destroy the cars and cameras")
         util.destroy_vehicles(self.world)
@@ -298,7 +314,7 @@ def get_random_angle() -> float:
     """Return a random angle (in degree) in the range [-20, +20] rounded by second decimal."""
     return round(random.uniform(-20,20), 2)
 
-def main(n_video: int, height, width, fps, duration_in_second, gamma=2.2):
+def main(n_video: int, height, width, fps, duration_in_second, vehicle_transform: "carla.Transform", gamma=2.2):
 
     dataset_path: Path = _make_dataset_directory()
     video_name_template = "{index:03d}-pitch={pitch}-yaw={yaw}.mp4"
@@ -308,6 +324,7 @@ def main(n_video: int, height, width, fps, duration_in_second, gamma=2.2):
         duration_in_second=duration_in_second,
         height=height,
         width=width,
+        vehicle_transform=vehicle_transform,
         gamma=gamma,
     )
 
@@ -333,13 +350,26 @@ if __name__ == "__main__":
     log_level = logging.DEBUG if True else logging.INFO
     logging.basicConfig(format="%(levelname)s: %(message)s", level=log_level)
 
+    """
+    # Spawn the player.
+    spawn_points = world.get_map().get_spawn_points()
+    # spawn_point = random.choice(spawn_points)
+    spawn_point = spawn_points[0]
+    
+    """
+    vehicle_transform: "carla.Transform" = carla.Transform(
+        carla.Location(x=586.8056030273438, y=-10.063207626342773, z=0.29999998211860657),
+        carla.Rotation(yaw=-179.58056640625),
+    )
+    num_videos = 100
     main(
-        n_video=3,
+        n_video=num_videos,
         fps=30,
         duration_in_second=5,
         height=720,
         width=1280,
-        gamma=2.2
+        gamma=2.2,
+        vehicle_transform=vehicle_transform,
     )
 
     # recorder = Recorder(map='/Game/Carla/Maps/Town10HD',)
