@@ -6,8 +6,9 @@ varying camera orientation; yaw and pitch.
 
 In every video a car,
 
-- starts from a same location, and 
-- drives toward a same direction straight at constant speed (60 kph).
+- starts from a same location,
+- drives toward a same direction straight at constant speed (60 kph), and
+- has two cameras: RGB and segmentation
 
 THE ONLY variables are camera yaw and pitch.
 Yaw and Pitch are randomly generated from a common range.
@@ -143,6 +144,27 @@ def get_camera(world, parent_actor, height, width, gamma, yaw, pitch):
     return camera
 
 
+def get_camera_segmentation(world, parent_actor, height, width, gamma, yaw, pitch):
+    [
+        "sensor.camera.semantic_segmentation",
+        cc.CityScapesPalette,
+        "Camera Semantic Segmentation (CityScapes Palette)",
+        {},
+    ],
+    bp_library = world.get_blueprint_library()
+    bp = bp_library.find("sensor.camera.semantic_segmentation")
+    bp.set_attribute("image_size_x", str(width))
+    bp.set_attribute("image_size_y", str(height))
+    bp.set_attribute("fov", "70")
+
+    camera = world.spawn_actor(
+        bp,
+        get_camera_transform(yaw, pitch),
+        attach_to=parent_actor,
+    )
+    return camera
+
+
 def set_target_velocity(
     vehicle: "carla.Actor", velocity_in_kph: "carla.libcarla.Vector3D"
 ):
@@ -155,8 +177,8 @@ def set_target_velocity(
     vehicle.set_target_velocity(velocity_in_mps)
 
 
-def carla_camera_data_to_numpy(data) -> ndarray:
-    data.convert(cc.Raw)
+def carla_camera_data_to_numpy(data, color_converter: carla.ColorConverter) -> ndarray:
+    data.convert(color_converter)
     image = np.frombuffer(data.raw_data, dtype=np.dtype("uint8"))
     image = np.reshape(image, (data.height, data.width, 4))
     image = image[:, :, :3]
@@ -164,12 +186,16 @@ def carla_camera_data_to_numpy(data) -> ndarray:
 
 
 def save_video(
-    camera_data: List, video_path: str, fps: int, resolution: Tuple[int, int]
+    camera_data: List,
+    video_path: str,
+    fps: int,
+    resolution: Tuple[int, int],
+    color_converter: carla.ColorConverter,
 ):
     vwriter = cv.VideoWriter(video_path, VideoWriter_fourcc(*"mp4v"), fps, resolution)
 
     for data in camera_data:
-        vwriter.write(carla_camera_data_to_numpy(data))
+        vwriter.write(carla_camera_data_to_numpy(data, color_converter))
 
     vwriter.release()
 
@@ -185,9 +211,10 @@ class CarlaSyncMode(object):
 
     """
 
-    def __init__(self, world, camera, fps):
+    def __init__(self, world, camera, camera_segmentation, fps):
         self.world = world
         self.camera = camera
+        self.camera_segmentation = camera_segmentation
         self.frame = None
         self.delta_seconds = 1.0 / fps
         self._queues = []
@@ -212,6 +239,10 @@ class CarlaSyncMode(object):
         self.camera.listen(q.put)
         self._queues.append(q)
 
+        q = queue.Queue()
+        self.camera_segmentation.listen(q.put)
+        self._queues.append(q)
+
         return self
 
     def tick(self, timeout):
@@ -229,6 +260,7 @@ class CarlaSyncMode(object):
         self.world.apply_settings(self._settings)
 
         self.camera.stop()
+        self.camera_segmentation.stop()
 
     def _retrieve_data(self, sensor_queue, timeout):
         while True:
@@ -242,6 +274,7 @@ class Recorder(object):
         self, fps, duration_in_second, height, width, vehicle_transform, gamma
     ):
         self.camera_data: List["carla.Image"] = []
+        self.camera_segmentation_data: List["carla.Image"] = []
         self.vehicle = None
         self.fps: int = fps
         self.height = height
@@ -280,8 +313,19 @@ class Recorder(object):
                 yaw=yaw,
                 pitch=pitch,
             )
+            self.camera_segmentation = get_camera_segmentation(
+                self.world,
+                parent_actor=self.vehicle,
+                height=self.height,
+                width=self.width,
+                gamma=self.gamma,
+                yaw=yaw,
+                pitch=pitch,
+            )
+
         else:
             self.camera.set_transform(get_camera_transform(yaw, pitch))
+            self.camera_segmentation.set_transform(get_camera_transform(yaw, pitch))
 
     def _reset_car(self):
         """Reset car transform (orientation and position) and velocity.
@@ -295,20 +339,30 @@ class Recorder(object):
         self._reset_car()
         self._reset_camera(yaw, pitch)
         self.camera_data.clear()
+        self.camera_segmentation_data.clear()
 
-    def record(self, output_path: str, yaw: float, pitch: float):
+    def record(
+        self,
+        output_rgb_path: str,
+        output_segmentation_path: str,
+        yaw: float,
+        pitch: float,
+    ):
         self.reset(yaw, pitch)
         self._warmup(seconds=2)
         ############################
         # Capture video
-        print(f"Simulating {output_path}")
+        print(f"Simulating {output_rgb_path}")
         _start = time.perf_counter()
 
-        with CarlaSyncMode(self.world, self.camera, fps=self.fps) as sync_mode:
+        with CarlaSyncMode(
+            self.world, self.camera, self.camera_segmentation, fps=self.fps
+        ) as sync_mode:
             for _ in range(self.target_n_frames):
                 # Advance the simulation and wait for the data.
-                _, camera_data = sync_mode.tick(timeout=2.0)
+                _, camera_data, camera_segmentation_data = sync_mode.tick(timeout=2.0)
                 self.camera_data.append(camera_data)
+                self.camera_segmentation_data.append(camera_segmentation_data)
 
         _end = time.perf_counter()
         print(
@@ -317,7 +371,14 @@ class Recorder(object):
 
         ############################
 
-        save_video(self.camera_data, output_path, self.fps, self.resolution)
+        save_video(self.camera_data, output_rgb_path, self.fps, self.resolution, cc.Raw)
+        save_video(
+            self.camera_segmentation_data,
+            output_segmentation_path,
+            self.fps,
+            self.resolution,
+            cc.CityScapesPalette,
+        )
 
     def destroy(self):
         logging.info("Destroy the cars and cameras")
@@ -337,7 +398,7 @@ def _make_dataset_directory() -> Path:
 
 def get_random_angle() -> float:
     """Return a random angle (in degree) in the range [-20, +20] rounded by second decimal."""
-    return round(random.uniform(-20, 20), 2)
+    return round(random.uniform(-3, 3), 2)
 
 
 def main(
@@ -351,7 +412,10 @@ def main(
 ):
 
     dataset_path: Path = _make_dataset_directory()
-    video_name_template = "{index:03d}-pitch={pitch}-yaw={yaw}.mp4"
+    video_rgb_name_template = "{index:03d}-rgb-pitch={pitch}-yaw={yaw}.mp4"
+    video_segmentation_name_template = (
+        "{index:03d}-segmentation-pitch={pitch}-yaw={yaw}.mp4"
+    )
 
     recorder = Recorder(
         fps=fps,
@@ -365,13 +429,20 @@ def main(
     for i in range(n_video):
         pitch: float = get_random_angle()
         yaw: float = get_random_angle()
-        video_name = video_name_template.format(index=i, pitch=pitch, yaw=yaw)
-        video_path: str = str(dataset_path / video_name)
+        video_rgb_name = video_rgb_name_template.format(index=i, pitch=pitch, yaw=yaw)
+        video_segmentation_name = video_segmentation_name_template.format(
+            index=i, pitch=pitch, yaw=yaw
+        )
 
-        assert not os.path.exists(video_path), f"{video_path} exists already!"
+        video_rgb_path: str = str(dataset_path / video_rgb_name)
+        video_segmentation_path: str = str(dataset_path / video_segmentation_name)
+
+        assert not os.path.exists(video_rgb_path), f"{video_rgb_path} exists already!"
 
         try:
-            recorder.record(video_path, yaw=yaw, pitch=pitch)
+            recorder.record(
+                video_rgb_path, video_segmentation_path, yaw=yaw, pitch=pitch
+            )
         except Exception as e:
             print(e)
             return
